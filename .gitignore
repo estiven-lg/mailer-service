@@ -1,0 +1,8 @@
+# Binarios
+/main
+
+# Dependencias de Go
+/go.sum
+
+# Archivos de entorno
+.env
