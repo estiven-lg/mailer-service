@@ -19,15 +19,10 @@ RUN apk --no-cache add ca-certificates
 
 
 COPY --from=builder /app/main /app/main
-
-# Copia tu archivo .env si lo necesitas
 COPY .env /app/.env
 
-# Define el directorio de trabajo
 WORKDIR /app
 
-# Expone el puerto si tu microservicio escucha en 8080 (ajústalo según tu código)
 EXPOSE 8080
 
-# Comando por defecto
 CMD ["./main"]
