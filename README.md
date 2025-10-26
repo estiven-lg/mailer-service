@@ -66,3 +66,15 @@ curl -X POST http://localhost:8080/send-email \
     "subject": "Asunto del correo",
     "body": "<h1>Hola</h1><p>Este es un correo de prueba</p>"
   }'
+
+### 4. Ejecutar con Docker
+
+Si quieres ejecutar el microservicio usando Docker:
+
+```bash
+# Construir la imagen del microservicio
+docker build -t mailer-service .
+
+# Ejecutar el contenedor
+docker run -p 8080:8080 --env-file .env mailer-service
+```
