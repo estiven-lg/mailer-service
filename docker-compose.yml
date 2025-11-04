@@ -1,0 +1,36 @@
+services:
+  db:
+    image: postgres:16
+    environment:
+      POSTGRES_USER: mailer
+      POSTGRES_PASSWORD: mailerpass
+      POSTGRES_DB: mailerdb
+    ports: ["5432:5432"]
+    volumes: ["pgdata:/var/lib/postgresql/data"]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U mailer -d mailerdb"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  adminer:
+    image: adminer
+    ports: ["8081:8080"]
+    depends_on: ["db"]
+
+  app:                          
+    build:
+      context: .
+      dockerfile: Dockerfile
+    env_file:
+      - .env
+    environment:
+      DB_DSN: postgres://mailer:mailerpass@db:5432/mailerdb?sslmode=disable
+    ports: ["8080:8080"]
+    depends_on:
+      db:
+        condition: service_healthy
+    restart: unless-stopped
+
+volumes:
+  pgdata:

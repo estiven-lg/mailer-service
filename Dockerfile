@@ -1,28 +1,18 @@
-# Etapa 1: Construcción
-FROM golang:1.21-alpine AS builder
-
+# ---------- build ----------
+FROM golang:1.23-alpine AS builder
 WORKDIR /app
-
+RUN apk add --no-cache git ca-certificates tzdata
 COPY go.mod go.sum ./
 RUN go mod download
-
-
 COPY . .
+# binario estático y compacto
+RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -ldflags="-s -w" -o /out/mailer-service .
 
-RUN go build -o main .
-
-# Etapa 2: Imagen ligera para producción
-FROM alpine:latest
-
-# Instala ca-certificates para conexiones HTTPS
-RUN apk --no-cache add ca-certificates
-
-
-COPY --from=builder /app/main /app/main
-COPY .env /app/.env
-
+# ---------- runtime mínimo ----------
+FROM scratch
 WORKDIR /app
-
+COPY --from=builder /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/
+COPY --from=builder /usr/share/zoneinfo /usr/share/zoneinfo
+COPY --from=builder /out/mailer-service /app/mailer-service
 EXPOSE 8080
-
-CMD ["./main"]
+ENTRYPOINT ["/app/mailer-service"]

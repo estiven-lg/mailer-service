@@ -6,37 +6,43 @@ import (
 	"os"
 
 	"mailer-service/handlers"
+	"mailer-service/storage"
 
 	"github.com/joho/godotenv"
 )
 
 func main() {
-	// Load environment variables from .env
-	err := godotenv.Load()
-	if err != nil {
-		log.Println("Warning: No se pudo cargar el archivo .env:", err)
-		log.Println("Usando variables de entorno del sistema")
+	if err := godotenv.Load(); err != nil {
+		log.Println("Warning: No se pudo cargar .env:", err)
 	}
 
-	// Get port from environment variables
 	port := getEnv("SERVER_PORT", "8080")
 	host := getEnv("SERVER_HOST", "localhost")
-
-	// Configure routes
-	http.HandleFunc("/send-email", handlers.SendEmailHandler)
-	http.HandleFunc("/health", handlers.HealthCheckHandler)
-
-	// Start server
+	dsn := getEnv("DB_DSN", "postgres://mailer:mailerpass@localhost:5432/mailerdb?sslmode=disable")
+	store, err := storage.Open(dsn)
+	if err != nil {
+		log.Fatal("Error abriendo BD:", err)
+	}
+	h := handlers.NewEmailHandler(store)
+	mux := http.NewServeMux()
+	mux.HandleFunc("/send", h.SendEmailHandler)
+	mux.HandleFunc("/send-email", h.SendEmailHandler)
+	mux.HandleFunc("/send-from-template", h.SendFromTemplateHandler)
+	mux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("ok"))
+	})
+	mux.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("ok"))
+	})
 	serverAddr := host + ":" + port
 	log.Printf("Servidor de correo iniciado en http://%s", serverAddr)
-	log.Fatal(http.ListenAndServe(":"+port, nil))
+	log.Fatal(http.ListenAndServe(":"+port, mux))
 }
-
-// getEnv fetches environment variables with a default value
 func getEnv(key, defaultValue string) string {
-	value := os.Getenv(key)
-	if value == "" {
-		return defaultValue
+	if v := os.Getenv(key); v != "" {
+		return v
 	}
-	return value
+	return defaultValue
 }
