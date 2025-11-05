@@ -1,8 +1,8 @@
-// handlers/email.go
 package handlers
 
 import (
 	"bytes"
+	"database/sql"
 	"encoding/json"
 	"fmt"
 	htmltmpl "html/template" // alias para HTML
@@ -63,7 +63,7 @@ func (h *EmailHandler) SendEmailHandler(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	// Enviamos (sólo HTML aquí; si quieres, puedes pasar body también como texto)
+	// Enviar
 	if err := h.sendSMTP(req.To, req.Subject, "", req.Body); err != nil {
 		_ = h.Store.MarkFailed(r.Context(), id, err.Error())
 		sendErrorResponse(w, "Error enviando correo: "+err.Error())
@@ -82,14 +82,6 @@ func (h *EmailHandler) SendEmailHandler(w http.ResponseWriter, r *http.Request) 
 //	/send-from-template (con plantillas)
 //
 // ==================================
-// POST JSON:
-//
-//	{
-//	  "templateKey": "bienvenida",
-//	  "locale": "es-GT",             // opcional
-//	  "to": "destino@dominio.com",
-//	  "data": { "userName": "Jonatan", "supportEmail": "soporte@empresa.com" }
-//	}
 type TemplatedEmailRequest struct {
 	TemplateKey string         `json:"templateKey"`
 	Locale      string         `json:"locale,omitempty"`
@@ -122,14 +114,12 @@ func (h *EmailHandler) SendFromTemplateHandler(w http.ResponseWriter, r *http.Re
 		req.Data = map[string]any{}
 	}
 
-	// 1) Buscar versión activa
 	tv, err := h.Store.GetActiveTemplateVersion(r.Context(), req.TemplateKey, req.Locale)
 	if err != nil || tv == nil {
 		sendErrorResponse(w, "Plantilla no encontrada o inactiva")
 		return
 	}
 
-	// 2) Render subject + body (HTML y/o texto)
 	subject, err := renderText(tv.Subject, req.Data)
 	if err != nil {
 		sendErrorResponse(w, "Error renderizando subject: "+err.Error())
@@ -158,14 +148,12 @@ func (h *EmailHandler) SendFromTemplateHandler(w http.ResponseWriter, r *http.Re
 		return
 	}
 
-	// 3) Guardar como queued
 	id, err := h.Store.InsertQueued(r.Context(), req.To, subject, bodyPersist)
 	if err != nil {
 		sendErrorResponse(w, "Error BD (queued): "+err.Error())
 		return
 	}
 
-	// 4) Enviar SMTP (multipart/alternative si hay ambos)
 	if err := h.sendSMTP(req.To, subject, bodyText, bodyHTML); err != nil {
 		_ = h.Store.MarkFailed(r.Context(), id, err.Error())
 		sendErrorResponse(w, "Error enviando correo: "+err.Error())
@@ -177,6 +165,101 @@ func (h *EmailHandler) SendFromTemplateHandler(w http.ResponseWriter, r *http.Re
 		Success: true,
 		Message: "Correo enviado (plantilla)",
 	})
+}
+
+// =========================
+//
+//	DRAFTS (crear / editar)
+//
+// =========================
+type DraftRequest struct {
+	To      string `json:"to"`
+	Subject string `json:"subject"`
+	Body    string `json:"body"`
+}
+
+// POST /drafts  -> crea borrador (NO envía)
+func (h *EmailHandler) CreateDraftHandler(w http.ResponseWriter, r *http.Request) {
+	setCORSHeaders(w)
+	if r.Method == http.MethodOptions {
+		w.WriteHeader(http.StatusOK)
+		return
+	}
+	if r.Method != http.MethodPost {
+		http.Error(w, "Método no permitido", http.StatusMethodNotAllowed)
+		return
+	}
+
+	var req DraftRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		sendErrorResponse(w, "Error decodificando JSON: "+err.Error())
+		return
+	}
+	if strings.TrimSpace(req.To) == "" || strings.TrimSpace(req.Subject) == "" || strings.TrimSpace(req.Body) == "" {
+		sendErrorResponse(w, "Todos los campos (to, subject, body) son requeridos")
+		return
+	}
+	if !isValidEmail(req.To) {
+		sendErrorResponse(w, "Formato de email destinatario inválido")
+		return
+	}
+
+	id, err := h.Store.InsertDraft(r.Context(), req.To, req.Subject, req.Body)
+	if err != nil {
+		sendErrorResponse(w, "Error BD (draft): "+err.Error())
+		return
+	}
+
+	writeJSON(w, http.StatusOK, models.EmailResponse{
+		Success: true,
+		Message: fmt.Sprintf("Borrador creado (id=%d)", id),
+	})
+}
+
+// PUT /drafts/{id}  -> edita borrador solo si status='draft'
+func (h *EmailHandler) UpdateDraftHandler(w http.ResponseWriter, r *http.Request) {
+	setCORSHeaders(w)
+	if r.Method == http.MethodOptions {
+		w.WriteHeader(http.StatusOK)
+		return
+	}
+	if r.Method != http.MethodPut {
+		http.Error(w, "Método no permitido", http.StatusMethodNotAllowed)
+		return
+	}
+
+	idStr := strings.TrimPrefix(r.URL.Path, "/drafts/")
+	id64, err := strconv.ParseInt(idStr, 10, 64)
+	if err != nil || id64 <= 0 {
+		sendErrorResponse(w, "ID inválido")
+		return
+	}
+
+	var req DraftRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		sendErrorResponse(w, "Error decodificando JSON: "+err.Error())
+		return
+	}
+	if strings.TrimSpace(req.To) == "" || strings.TrimSpace(req.Subject) == "" || strings.TrimSpace(req.Body) == "" {
+		sendErrorResponse(w, "Todos los campos (to, subject, body) son requeridos")
+		return
+	}
+	if !isValidEmail(req.To) {
+		sendErrorResponse(w, "Formato de email destinatario inválido")
+		return
+	}
+
+	ok, err := h.Store.UpdateDraft(r.Context(), id64, req.To, req.Subject, req.Body)
+	if err != nil {
+		sendErrorResponse(w, "Error BD (update draft): "+err.Error())
+		return
+	}
+	if !ok {
+		sendErrorResponse(w, "No se encontró borrador o ya no está en estado draft")
+		return
+	}
+
+	writeJSON(w, http.StatusOK, models.EmailResponse{Success: true, Message: "Borrador actualizado"})
 }
 
 // =========================
@@ -203,7 +286,6 @@ func (h *EmailHandler) sendSMTP(to, subject, bodyText, bodyHTML string) error {
 	boundary := "mixed_boundary"
 
 	if bodyHTML != "" && bodyText != "" {
-		// multipart/alternative: primero texto, luego HTML
 		msg.WriteString(fmt.Sprintf("From: %s\r\n", from))
 		msg.WriteString(fmt.Sprintf("To: %s\r\n", to))
 		msg.WriteString(fmt.Sprintf("Subject: %s\r\n", subject))
@@ -220,7 +302,6 @@ func (h *EmailHandler) sendSMTP(to, subject, bodyText, bodyHTML string) error {
 
 		msg.WriteString("--" + boundary + "--")
 	} else {
-		// Solo texto o solo HTML
 		ct := "text/plain"
 		body := bodyText
 		if bodyHTML != "" {
@@ -235,7 +316,6 @@ func (h *EmailHandler) sendSMTP(to, subject, bodyText, bodyHTML string) error {
 		msg.WriteString(body)
 	}
 
-	// Timeout configurable
 	timeoutSec, _ := strconv.Atoi(getEnv("EMAIL_TIMEOUT", "30"))
 	c := make(chan error, 1)
 	go func() { c <- smtp.SendMail(addr, auth, from, toList, msg.Bytes()) }()
@@ -256,7 +336,7 @@ func (h *EmailHandler) sendSMTP(to, subject, bodyText, bodyHTML string) error {
 func setCORSHeaders(w http.ResponseWriter) {
 	w.Header().Set("Content-Type", "application/json")
 	w.Header().Set("Access-Control-Allow-Origin", "*")
-	w.Header().Set("Access-Control-Allow-Methods", "POST, GET, OPTIONS")
+	w.Header().Set("Access-Control-Allow-Methods", "POST, GET, OPTIONS, DELETE, PUT")
 	w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization")
 }
 
@@ -284,7 +364,6 @@ func isValidEmail(email string) bool {
 	return len(email) > 3 && strings.Contains(email, "@") && strings.Contains(email, ".")
 }
 
-// Render HTML con autoescape
 func renderHTML(tpl string, data map[string]any) (string, error) {
 	t, err := htmltmpl.New("html").Parse(tpl)
 	if err != nil {
@@ -307,4 +386,228 @@ func renderText(tpl string, data map[string]any) (string, error) {
 		return "", err
 	}
 	return buf.String(), nil
+}
+
+// =========================
+//  CRUD adicional (Emails y Templates)
+// =========================
+
+// GET /emails?status=&limit=&offset=
+func (h *EmailHandler) ListEmailsHandler(w http.ResponseWriter, r *http.Request) {
+	setCORSHeaders(w)
+	if r.Method == http.MethodOptions {
+		w.WriteHeader(http.StatusOK)
+		return
+	}
+	if r.Method != http.MethodGet {
+		http.Error(w, "Método no permitido", http.StatusMethodNotAllowed)
+		return
+	}
+
+	q := r.URL.Query()
+	f := storage.EmailFilter{}
+	f.Status = strings.TrimSpace(q.Get("status"))
+	if v := q.Get("limit"); v != "" {
+		if n, _ := strconv.Atoi(v); n > 0 {
+			f.Limit = n
+		}
+	}
+	if v := q.Get("offset"); v != "" {
+		if n, _ := strconv.Atoi(v); n >= 0 {
+			f.Offset = n
+		}
+	}
+
+	items, err := h.Store.ListEmails(r.Context(), f)
+	if err != nil {
+		sendErrorResponse(w, "Error listando emails: "+err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, items)
+}
+
+// GET /emails/{id}
+func (h *EmailHandler) GetEmailHandler(w http.ResponseWriter, r *http.Request) {
+	setCORSHeaders(w)
+	if r.Method == http.MethodOptions {
+		w.WriteHeader(http.StatusOK)
+		return
+	}
+	if r.Method != http.MethodGet {
+		http.Error(w, "Método no permitido", http.StatusMethodNotAllowed)
+		return
+	}
+
+	idStr := strings.TrimPrefix(r.URL.Path, "/emails/")
+	idNum, err := strconv.ParseInt(idStr, 10, 64)
+	if err != nil || idNum <= 0 {
+		sendErrorResponse(w, "ID inválido")
+		return
+	}
+
+	item, err := h.Store.GetEmailByID(r.Context(), idNum)
+	if err != nil {
+		sendErrorResponse(w, "Error obteniendo email: "+err.Error())
+		return
+	}
+	if item == nil {
+		http.NotFound(w, r)
+		return
+	}
+
+	writeJSON(w, http.StatusOK, item)
+}
+
+// DELETE /emails/{id}
+func (h *EmailHandler) DeleteEmailHandler(w http.ResponseWriter, r *http.Request) {
+	setCORSHeaders(w)
+	if r.Method == http.MethodOptions {
+		w.WriteHeader(http.StatusOK)
+		return
+	}
+	if r.Method != http.MethodDelete {
+		http.Error(w, "Método no permitido", http.StatusMethodNotAllowed)
+		return
+	}
+
+	idStr := strings.TrimPrefix(r.URL.Path, "/emails/")
+	idNum, err := strconv.ParseInt(idStr, 10, 64)
+	if err != nil || idNum <= 0 {
+		sendErrorResponse(w, "ID inválido")
+		return
+	}
+
+	if err := h.Store.DeleteEmail(r.Context(), idNum); err != nil {
+		sendErrorResponse(w, "Error eliminando: "+err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"success": true})
+}
+
+// GET /templates
+func (h *EmailHandler) ListTemplatesHandler(w http.ResponseWriter, r *http.Request) {
+	setCORSHeaders(w)
+	if r.Method == http.MethodOptions {
+		w.WriteHeader(http.StatusOK)
+		return
+	}
+	if r.Method != http.MethodGet {
+		http.Error(w, "Método no permitido", http.StatusMethodNotAllowed)
+		return
+	}
+
+	items, err := h.Store.ListTemplates(r.Context())
+	if err != nil {
+		sendErrorResponse(w, "Error listando templates: "+err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, items)
+}
+
+// GET /templates/{key}/versions
+func (h *EmailHandler) ListTemplateVersionsHandler(w http.ResponseWriter, r *http.Request) {
+	setCORSHeaders(w)
+	if r.Method == http.MethodOptions {
+		w.WriteHeader(http.StatusOK)
+		return
+	}
+	if r.Method != http.MethodGet {
+		http.Error(w, "Método no permitido", http.StatusMethodNotAllowed)
+		return
+	}
+
+	key := strings.TrimPrefix(r.URL.Path, "/templates/")
+	key = strings.TrimSuffix(key, "/versions")
+	key = strings.TrimSpace(key)
+	if key == "" || strings.Contains(key, "/") {
+		sendErrorResponse(w, "Template key inválida")
+		return
+	}
+	items, err := h.Store.ListTemplateVersions(r.Context(), key)
+	if err != nil {
+		sendErrorResponse(w, "Error listando versiones: "+err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, items)
+}
+
+type CreateVersionReq struct {
+	TemplateKey string  `json:"templateKey"`
+	Locale      string  `json:"locale"`
+	Subject     string  `json:"subject"`
+	BodyHTML    *string `json:"bodyHtml,omitempty"`
+	BodyText    *string `json:"bodyText,omitempty"`
+	Activate    bool    `json:"activate"`
+}
+
+// POST /templates/versions
+func (h *EmailHandler) CreateTemplateVersionHandler(w http.ResponseWriter, r *http.Request) {
+	setCORSHeaders(w)
+	if r.Method == http.MethodOptions {
+		w.WriteHeader(http.StatusOK)
+		return
+	}
+	if r.Method != http.MethodPost {
+		http.Error(w, "Método no permitido", http.StatusMethodNotAllowed)
+		return
+	}
+
+	var req CreateVersionReq
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		sendErrorResponse(w, "JSON inválido: "+err.Error())
+		return
+	}
+	if strings.TrimSpace(req.TemplateKey) == "" || strings.TrimSpace(req.Locale) == "" || strings.TrimSpace(req.Subject) == "" {
+		sendErrorResponse(w, "templateKey, locale y subject son requeridos")
+		return
+	}
+	htmlNull := sql.NullString{Valid: req.BodyHTML != nil, String: zeroIfNil(req.BodyHTML)}
+	textNull := sql.NullString{Valid: req.BodyText != nil, String: zeroIfNil(req.BodyText)}
+
+	if err := h.Store.CreateTemplateVersion(r.Context(), req.TemplateKey, req.Locale, req.Subject, htmlNull, textNull, req.Activate); err != nil {
+		sendErrorResponse(w, "Error creando versión: "+err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"success": true})
+}
+
+type ActivateReq struct {
+	TemplateKey string `json:"templateKey"`
+	Version     int    `json:"version"`
+	Locale      string `json:"locale"`
+}
+
+// PUT /templates/activate
+func (h *EmailHandler) ActivateTemplateVersionHandler(w http.ResponseWriter, r *http.Request) {
+	setCORSHeaders(w)
+	if r.Method == http.MethodOptions {
+		w.WriteHeader(http.StatusOK)
+		return
+	}
+	if r.Method != http.MethodPut {
+		http.Error(w, "Método no permitido", http.StatusMethodNotAllowed)
+		return
+	}
+
+	var req ActivateReq
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		sendErrorResponse(w, "JSON inválido: "+err.Error())
+		return
+	}
+	if strings.TrimSpace(req.TemplateKey) == "" || req.Version <= 0 || strings.TrimSpace(req.Locale) == "" {
+		sendErrorResponse(w, "templateKey, version y locale son requeridos")
+		return
+	}
+	if err := h.Store.ActivateTemplateVersion(r.Context(), req.TemplateKey, req.Version, req.Locale); err != nil {
+		sendErrorResponse(w, "Error activando versión: "+err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"success": true})
+}
+
+func zeroIfNil(p *string) string {
+	if p == nil {
+		return ""
+	}
+	return *p
 }
